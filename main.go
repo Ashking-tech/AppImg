@@ -1,44 +1,43 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"os"
-	
+	"strings"
+	"time"
 )
 
-func main() {
-	path := "filepath.txt"
+func runPipeline(path string, u *ui) string {
 
 	//validate
-	regular,err := isRegular(path)
-	if err != nil {
-		fmt.Println(err)
-	}
+	u.step("Validate", func() (string, error) {
+		regular, err := isRegular(path)
+		if err != nil {
+			return "", err
+		}
+		if !regular {
+			return "", fmt.Errorf("not a regular file: %s", path)
+		}
+		return path, nil
+	})
 
-	if !regular{
-		fmt.Println("not a regular file")
-		return
-	}
-	
-	//create /appllications
-	err = CreateApplicationsDir()
-	if err != nil {
-		
-		fmt.Println(err)
-	}
-	
-	fmt.Println("Applications directory created")
-	return
+	//create /Applications
+	u.step("Create Applications dir", func() (string, error) {
+		if err := CreateApplicationsDir(); err != nil {
+			return "", err
+		}
+		return "", nil
+	})
 
 	//get destination
-	home,err := os.UserHomeDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Println(err)
-		return
+		fail("%v", err)
 	}
-
 
 	destination := filepath.Join(
 		home,
@@ -47,82 +46,152 @@ func main() {
 	)
 
 	//Moving the file
-
-	err = MoveAppImage(path,destination)
-	
-	if err != nil {
-		
-		fmt.Println(err)
-		return
-	}
-
-	fmt.Println("AppImage moved to :", destination)
-
+	u.step("Move AppImage", func() (string, error) {
+		if err := MoveAppImage(path, destination); err != nil {
+			return "", err
+		}
+		return destination, nil
+	})
 
 	//extracting app image
-	err = ExtractAppImage(destination)
-	if err != nil {
-		fmt.println(err)
-		return
-	}
-
+	u.step("Extract AppImage", func() (string, error) {
+		if err := ExtractAppImage(destination); err != nil {
+			return "", err
+		}
+		return "", nil
+	})
 
 	//finding desktopfile
-	if err != nil {
-		
-		fmt.println(err)
-		return
-	}
-	fmt.Println("desktop file:",desktop)
-
+	extractRoot := filepath.Join(filepath.Dir(destination), "squashfs-root")
+	var desktop string
+	u.step("Find desktop file", func() (string, error) {
+		d, err := FindDesktopFile(extractRoot)
+		if err != nil {
+			return "", err
+		}
+		desktop = d
+		return d, nil
+	})
 
 	//finding icon
-	icon,err := FindIcon("squash-root")
-	
-	if err != nil {
-		
-		fmt.println(err)
-		return
-	}
-	fmt.Println("icon file:",icon)
+	var icon string
+	u.step("Find icon", func() (string, error) {
+		ic, err := FindIcon(extractRoot)
+		if err != nil {
+			return "", err
+		}
+		icon = ic
+		return ic, nil
+	})
+
+	//installing icon outside squashfs-root so the entry survives
+	appName := strings.TrimSuffix(filepath.Base(destination), filepath.Ext(destination))
+	var installedIcon string
+	u.step("Install icon", func() (string, error) {
+		dst, err := InstallIcon(icon, appName)
+		if err != nil {
+			return "", err
+		}
+		installedIcon = dst
+		return dst, nil
+	})
+
+	//patching extracted desktop file to point at installed paths
+	u.step("Fix desktop file", func() (string, error) {
+		if err := FixDesktopFile(desktop, destination, installedIcon); err != nil {
+			return "", err
+		}
+		return "", nil
+	})
+
+	//generating + installing desktop entry
+	u.step("Install desktop entry", func() (string, error) {
+		desktopPath, err := GenerateDesktopFile(appName, destination, installedIcon)
+		if err != nil {
+			return "", err
+		}
+		if err := InstallDesktopFile(desktopPath); err != nil {
+			return "", err
+		}
+		return desktopPath, nil
+	})
+
+	return destination
 }
 
-//is the the file a regular or normal file
-func isRegular(path string)(bool, error){
-	info,err := os.Stat(path)
+// is the file a regular or normal file
+func isRegular(path string) (bool, error) {
+	info, err := os.Stat(path)
 	if err != nil {
-		return false,err
+		return false, err
 	}
 
-	return info.Mode().IsRegular() , nil
+	return info.Mode().IsRegular(), nil
 }
 
-
-func CreateApplicationsDir()error{
-	home,err := os.UserHomeDir()
+func CreateApplicationsDir() error {
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 
-	Newpath := filepath.Join(home,"Applications")
-	err =	os.MkdirAll(Newpath,0755)
+	newPath := filepath.Join(home, "Applications")
+	err = os.MkdirAll(newPath, 0755)
 	if err != nil {
 		return err
 	}
-	
-	return nil 
-}
 
-func MoveAppImage(path,path2 string)error{
-	err := os.Rename(path,path2)
-	if err != nil {
-		return err
-	}
 	return nil
 }
 
+func MoveAppImage(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Chmod(dst, info.Mode()); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
 func ExtractAppImage(path string) error {
-	cmd := exec.Command(path, "--appimage-extract")
+	if err := os.Chmod(path, 0755); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, "--appimage-extract")
+	cmd.Dir = filepath.Dir(path)
 
 	err := cmd.Run()
 	if err != nil {
@@ -142,7 +211,7 @@ func FindDesktopFile(root string) (string, error) {
 
 		if filepath.Ext(path) == ".desktop" {
 			found = path
-			return filepath.SkipDir
+			return filepath.SkipAll
 		}
 
 		return nil
@@ -152,20 +221,33 @@ func FindDesktopFile(root string) (string, error) {
 		return "", err
 	}
 
+	if found == "" {
+		return "", fmt.Errorf("no .desktop file found in %s", root)
+	}
+
 	return found, nil
 }
 
 func FindIcon(root string) (string, error) {
 	var found string
+	best := 0
+	priority := map[string]int{
+		".ico": 1,
+		".png": 2,
+		".svg": 3,
+	}
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		ext := filepath.Ext(path)
-		if ext == ".png" || ext == ".svg" || ext == ".ico" {
+		if p, ok := priority[filepath.Ext(path)]; ok && p > best {
 			found = path
+			best = p
+			if best == 3 {
+				return filepath.SkipAll
+			}
 		}
 
 		return nil
@@ -182,27 +264,116 @@ func FindIcon(root string) (string, error) {
 	return found, nil
 }
 
-func GenerateDesktopFile(name,appPath,iconPath string)error{
-	home,err := os.UserHomeDir()
+func InstallIcon(iconSrc, appName string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	iconsDir := filepath.Join(home, ".local", "share", "icons")
+	if err := os.MkdirAll(iconsDir, 0755); err != nil {
+		return "", err
+	}
+
+	dst := filepath.Join(iconsDir, appName+filepath.Ext(iconSrc))
+
+	in, err := os.Open(iconSrc)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+
+	return dst, nil
+}
+
+func FixDesktopFile(desktopSrc, appPath, iconPath string) error {
+	data, err := os.ReadFile(desktopSrc)
 	if err != nil {
 		return err
 	}
+
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Exec=") {
+			lines[i] = "Exec=" + appPath
+		} else if strings.HasPrefix(trimmed, "Icon=") {
+			lines[i] = "Icon=" + iconPath
+		}
+	}
+
+	return os.WriteFile(desktopSrc, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func InstallDesktopFile(desktopPath string) error {
+	if err := os.Chmod(desktopPath, 0755); err != nil {
+		return err
+	}
+
+	if _, err := exec.LookPath("update-desktop-database"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		dir := filepath.Dir(desktopPath)
+		if err := exec.CommandContext(ctx, "update-desktop-database", dir).Run(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func GenerateDesktopFile(name, appPath, iconPath string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	applicationsDir := filepath.Join(
+		home,
+		".local",
+		"share",
+		"applications",
+	)
+
+	// Make sure the applications directory exists
+	err = os.MkdirAll(applicationsDir, 0755)
+	if err != nil {
+		return "", err
+	}
+
 	desktopPath := filepath.Join(
 		home,
 		".local",
 		"share",
 		"applications",
-		name+".desktop"
+		name+".desktop",
 	)
 
 	content := fmt.Sprintf(`[Desktop Entry]
-		Name=%s
-		Exec=%s
-		Icon=%s
-		Type=Application
-		Terminal=false
-		Categories=Utility;
-		`, name, appPath, iconPath)
+Name=%s
+Exec=%s
+Icon=%s
+Type=Application
+Terminal=false
+Categories=Utility;
+`, name, appPath, iconPath)
 
-	return os.WriteFile(desktopPath,[]byte(content),0644)
+	if err := os.WriteFile(desktopPath, []byte(content), 0644); err != nil {
+		return "", err
+	}
+
+	return desktopPath, nil
 }
