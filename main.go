@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"os/exec"
 	"path/filepath"
+	"os"
+	
 )
 
 func main() {
@@ -71,3 +73,54 @@ func ExtractAppImage(path string) error {
 
     return nil
 }
+
+func FindDesktopFile(root string) (string, error) {
+	var found string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if filepath.Ext(path) == ".desktop" {
+			found = path
+			return filepath.SkipDir
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return found, nil
+}
+
+func FindIcon(root string) (string, error) {
+	var found string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		ext := filepath.Ext(path)
+		if ext == ".png" || ext == ".svg" || ext == ".ico" {
+			found = path
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	if found == "" {
+		return "", fmt.Errorf("no icon found")
+	}
+
+	return found, nil
+}
+
