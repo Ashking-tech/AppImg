@@ -10,23 +10,81 @@ import (
 
 func main() {
 	path := "filepath.txt"
-	rg,err := isRegular(path)
+
+	//validate
+	regular,err := isRegular(path)
 	if err != nil {
 		fmt.Println(err)
-	} 
-	if (rg == true){
-		
-		fmt.Printf("file checked")
 	}
+
+	if !regular{
+		fmt.Println("not a regular file")
+		return
+	}
+	
+	//create /appllications
 	err = CreateApplicationsDir()
 	if err != nil {
 		
-	fmt.Println(err)
+		fmt.Println(err)
 	}
 	
 	fmt.Println("Applications directory created")
 	return
 
+	//get destination
+	home,err := os.UserHomeDir()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+
+	destination := filepath.Join(
+		home,
+		"Applications",
+		filepath.Base(path),
+	)
+
+	//Moving the file
+
+	err = MoveAppImage(path,destination)
+	
+	if err != nil {
+		
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println("AppImage moved to :", destination)
+
+
+	//extracting app image
+	err = ExtractAppImage(destination)
+	if err != nil {
+		fmt.println(err)
+		return
+	}
+
+
+	//finding desktopfile
+	if err != nil {
+		
+		fmt.println(err)
+		return
+	}
+	fmt.Println("desktop file:",desktop)
+
+
+	//finding icon
+	icon,err := FindIcon("squash-root")
+	
+	if err != nil {
+		
+		fmt.println(err)
+		return
+	}
+	fmt.Println("icon file:",icon)
 }
 
 //is the the file a regular or normal file
@@ -47,7 +105,7 @@ func CreateApplicationsDir()error{
 	}
 
 	Newpath := filepath.Join(home,"Applications")
-    err =	os.MkdirAll(Newpath,0755)
+	err =	os.MkdirAll(Newpath,0755)
 	if err != nil {
 		return err
 	}
@@ -64,14 +122,14 @@ func MoveAppImage(path,path2 string)error{
 }
 
 func ExtractAppImage(path string) error {
-    cmd := exec.Command(path, "--appimage-extract")
+	cmd := exec.Command(path, "--appimage-extract")
 
-    err := cmd.Run()
-    if err != nil {
-        return err
-    }
+	err := cmd.Run()
+	if err != nil {
+		return err
+	}
 
-    return nil
+	return nil
 }
 
 func FindDesktopFile(root string) (string, error) {
@@ -124,3 +182,27 @@ func FindIcon(root string) (string, error) {
 	return found, nil
 }
 
+func GenerateDesktopFile(name,appPath,iconPath string)error{
+	home,err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	desktopPath := filepath.Join(
+		home,
+		".local",
+		"share",
+		"applications",
+		name+".desktop"
+	)
+
+	content := fmt.Sprintf(`[Desktop Entry]
+		Name=%s
+		Exec=%s
+		Icon=%s
+		Type=Application
+		Terminal=false
+		Categories=Utility;
+		`, name, appPath, iconPath)
+
+	return os.WriteFile(desktopPath,[]byte(content),0644)
+}
